@@ -23,6 +23,9 @@ jobs:
         with:
           gradle-version: '8.5'
 
+      - name: Accept SDK licenses
+        run: yes | sdkmanager --licenses
+
       - name: Set SDK path
         run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
