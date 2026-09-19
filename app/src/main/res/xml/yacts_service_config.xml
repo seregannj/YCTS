@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:canTakeScreenshot="true"
+    android:notificationTimeout="100"
+    android:summary="YaCTS — скриншот в Яндекс"
+    android:description="Делает скриншот и сразу открывает визуальный поиск Яндекса. Без интерфейса." />
