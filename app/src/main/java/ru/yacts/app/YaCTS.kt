@@ -109,36 +109,32 @@ class YaService : AccessibilityService() {
 
     private fun captureScreen() {
         try {
-            takeScreenshot(
-                System.currentTimeMillis(),
-                mainExecutor,
-                object : TakeScreenshotCallback {
-                    override fun onSuccess(result: ScreenshotResult) {
-                        val hw = result.hardwareBuffer
-                        val cs = result.colorSpace
-                        val hardBmp = Bitmap.wrapHardwareBuffer(hw, cs)
-                        hw.close()
-                        if (hardBmp == null) {
-                            Log.e(TAG, "Bitmap is null")
-                            return
-                        }
-                        val soft = hardBmp.copy(Bitmap.Config.ARGB_8888, false)
-                        hardBmp.recycle()
-
-                        val baos = ByteArrayOutputStream()
-                        soft.compress(Bitmap.CompressFormat.JPEG, 85, baos)
-                        soft.recycle()
-                        val bytes = baos.toByteArray()
-                        Log.i(TAG, "Screenshot: ${bytes.size} bytes")
-
-                        Thread { uploadAndOpen(bytes) }.start()
+            takeScreenshot(mainExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val hw = result.hardwareBuffer
+                    val cs = result.colorSpace
+                    val hardBmp = Bitmap.wrapHardwareBuffer(hw, cs)
+                    hw.close()
+                    if (hardBmp == null) {
+                        Log.e(TAG, "Bitmap is null")
+                        return
                     }
+                    val soft = hardBmp.copy(Bitmap.Config.ARGB_8888, false)
+                    hardBmp.recycle()
 
-                    override fun onFailure(errorCode: Int) {
-                        Log.e(TAG, "Screenshot failed: $errorCode")
-                    }
+                    val baos = ByteArrayOutputStream()
+                    soft.compress(Bitmap.CompressFormat.JPEG, 85, baos)
+                    soft.recycle()
+                    val bytes = baos.toByteArray()
+                    Log.i(TAG, "Screenshot: ${bytes.size} bytes")
+
+                    Thread { uploadAndOpen(bytes) }.start()
                 }
-            )
+
+                override fun onFailure(errorCode: Int) {
+                    Log.e(TAG, "Screenshot failed: $errorCode")
+                }
+            })
         } catch (t: Throwable) {
             Log.e(TAG, "takeScreenshot threw", t)
         }
