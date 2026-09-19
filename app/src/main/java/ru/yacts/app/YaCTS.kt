@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -89,6 +90,14 @@ class YaService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.i(TAG, "Service connected")
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Не используется — сервис управляется через startService с action
+    }
+
+    override fun onInterrupt() {
+        // Не используется
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -177,8 +186,8 @@ class YaService : AccessibilityService() {
         val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
-            connectTimeout = 30_000
-            readTimeout = 30_000
+            connectTimeout = 30000
+            readTimeout = 30000
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             setRequestProperty(
                 "User-Agent",
