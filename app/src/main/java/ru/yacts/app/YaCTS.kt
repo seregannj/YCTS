@@ -19,6 +19,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -241,6 +242,12 @@ class YaService : AccessibilityService() {
                                     "Не удалось преобразовать скриншот в Bitmap"
                                 )
 
+                                Toast.makeText(
+                                    this@YaService,
+                                    "Не удалось обработать скриншот",
+                                    Toast.LENGTH_LONG
+                                ).show()
+
                                 captureInProgress = false
                                 return
                             }
@@ -255,6 +262,12 @@ class YaService : AccessibilityService() {
                                     TAG,
                                     "Не удалось создать JPEG"
                                 )
+
+                                Toast.makeText(
+                                    this@YaService,
+                                    "Не удалось создать JPEG",
+                                    Toast.LENGTH_LONG
+                                ).show()
 
                                 captureInProgress = false
                                 return
@@ -286,6 +299,12 @@ class YaService : AccessibilityService() {
                             TAG,
                             "Ошибка screenshot. Код: $errorCode"
                         )
+
+                        Toast.makeText(
+                            this@YaService,
+                            "Ошибка создания скриншота (код $errorCode)",
+                            Toast.LENGTH_LONG
+                        ).show()
 
                         captureInProgress = false
                     }
@@ -449,8 +468,16 @@ class YaService : AccessibilityService() {
 
                 Log.e(
                     TAG,
-                    "Приложение Яндекс не принимает ACTION_SEND image/jpeg"
+                    "Приложение Яндекс не принимает ACTION_SEND image/jpeg " +
+                    "(не установлено или недоступно из-за package visibility)"
                 )
+
+                Toast.makeText(
+                    this,
+                    "Не удалось найти приложение Яндекс. " +
+                    "Проверьте, что оно установлено и обновлено.",
+                    Toast.LENGTH_LONG
+                ).show()
 
                 try {
                     imageFile.delete()
@@ -496,6 +523,12 @@ class YaService : AccessibilityService() {
                 "Ошибка отправки изображения в Яндекс",
                 e
             )
+
+            Toast.makeText(
+                this,
+                "Ошибка отправки изображения в Яндекс: ${e.message}",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 }
