@@ -6,8 +6,8 @@
 
     <application
         android:label="YaCTS"
-        android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher"
         android:allowBackup="false"
         android:theme="@android:style/Theme.NoTitleBar">
 
