@@ -59,8 +59,6 @@ class MainActivity : Activity() {
 
         YaService.requestCapture()
 
-        // Небольшая повторная попытка на случай,
-        // если AccessibilityService ещё не успел подключиться.
         handler.postDelayed({
             YaService.requestCapture()
         }, 1000)
@@ -94,7 +92,7 @@ class MainActivity : Activity() {
             textSize = 28f
         }
 
-        val text = TextView(this).apply {
+        val description = TextView(this).apply {
             text = """
                 
                 Для работы YaCTS нужно один раз включить специальную возможность.
@@ -122,7 +120,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(title)
-        root.addView(text)
+        root.addView(description)
 
         val params = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -157,14 +155,6 @@ class YaService : AccessibilityService() {
         @Volatile
         private var captureInProgress = false
 
-        /**
-         * Запрашивает создание скриншота.
-         *
-         * Если сервис уже подключён — запускаем сразу.
-         *
-         * Если Android ещё не успел подключить AccessibilityService,
-         * запрос сохраняется и будет выполнен в onServiceConnected().
-         */
         fun requestCapture() {
             Log.i(TAG, "requestCapture()")
 
@@ -197,7 +187,7 @@ class YaService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // События Accessibility здесь не нужны.
+        // Accessibility events are not required.
     }
 
     override fun onInterrupt() {
@@ -238,12 +228,6 @@ class YaService : AccessibilityService() {
     private fun captureScreen() {
         try {
 
-            /*
-             * ВАЖНО:
-             *
-             * Для Android 30+ здесь обязательно указывается
-             * Display.DEFAULT_DISPLAY.
-             */
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 mainExecutor,
@@ -279,7 +263,10 @@ class YaService : AccessibilityService() {
                             hardwareBitmap.recycle()
 
                             if (bitmap == null) {
-                                Log.e(TAG, "Failed to create software bitmap")
+                                Log.e(
+                                    TAG,
+                                    "Failed to create software bitmap"
+                                )
                                 captureInProgress = false
                                 return
                             }
@@ -310,6 +297,7 @@ class YaService : AccessibilityService() {
                             }.start()
 
                         } catch (e: Throwable) {
+
                             Log.e(
                                 TAG,
                                 "Error processing screenshot",
@@ -378,12 +366,6 @@ class YaService : AccessibilityService() {
 
         val uri = Uri.parse(url)
 
-        /*
-         * Сначала пробуем приложения Яндекса.
-         *
-         * Разные версии Android/Яндекс используют разные package name,
-         * поэтому проверяем несколько вариантов.
-         */
         val yandexPackages = listOf(
             "ru.yandex.searchplugin",
             "ru.yandex.searchapp",
@@ -414,7 +396,7 @@ class YaService : AccessibilityService() {
                 return
 
             } catch (_: ActivityNotFoundException) {
-                // Пробуем следующий пакет.
+                // Try next package.
             } catch (e: Throwable) {
 
                 Log.e(
@@ -425,10 +407,6 @@ class YaService : AccessibilityService() {
             }
         }
 
-        /*
-         * Если конкретное приложение Яндекса не найдено,
-         * открываем URL обычным ACTION_VIEW.
-         */
         try {
 
             val fallbackIntent = Intent(
@@ -440,7 +418,10 @@ class YaService : AccessibilityService() {
 
             startActivity(fallbackIntent)
 
-            Log.i(TAG, "Opened Yandex URL using default browser")
+            Log.i(
+                TAG,
+                "Opened Yandex URL using default browser"
+            )
 
         } catch (e: Throwable) {
 
@@ -596,17 +577,6 @@ class YaService : AccessibilityService() {
             val json =
                 JSONObject(jsonString)
 
-            /*
-             * Вариант 1:
-             *
-             * {
-             *   "blocks": {
-             *      "params": {
-             *          "url": "..."
-             *      }
-             *   }
-             * }
-             */
             try {
 
                 val blocks =
@@ -618,22 +588,15 @@ class YaService : AccessibilityService() {
                 return params.getString("url")
 
             } catch (_: Throwable) {
-                // Пробуем другой формат.
+                // Try another format.
             }
 
-            /*
-             * Вариант 2:
-             *
-             * {
-             *     "url": "..."
-             * }
-             */
             try {
 
                 return json.getString("url")
 
             } catch (_: Throwable) {
-                // URL не найден.
+                // URL not found.
             }
 
             null
