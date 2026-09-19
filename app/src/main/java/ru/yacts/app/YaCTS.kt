@@ -1,16 +1,20 @@
 package ru.yacts.app
 
 import android.accessibilityservice.AccessibilityService
-import android.app.Activity
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.Color
+import android.graphics.BitmapFactory
+import android.graphics.PixelFormat
+import android.hardware.HardwareBuffer
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.LinearLayout
@@ -19,352 +23,479 @@ import androidx.core.content.FileProvider
 import java.io.ByteArrayOutputStream
 import java.io.File
 
-private const val ACTION_CAPTURE = "ru.yacts.app.CAPTURE"
+private const val TAG = "YaCTS"
 
-class MainActivity : Activity() {
+private const val YANDEX_PACKAGE = "com.yandex.searchapp"
 
-    private var waitingForAccessibility = false
+class MainActivity : android.app.Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        if (isAccessibilityEnabled()) {
-            requestCapture()
-        } else {
-            waitingForAccessibility = true
-            showSetupScreen()
-        }
+        showMainScreen()
     }
 
     override fun onResume() {
         super.onResume()
 
-        if (waitingForAccessibility && isAccessibilityEnabled()) {
+        updateStatus()
+    }
+
+    private fun showMainScreen() {
+        val layout = LinearLayout(this)
+
+        layout.orientation = LinearLayout.VERTICAL
+        layout.setPadding(50, 80, 50, 50)
+
+        val title = TextView(this)
+        title.text = "YaCTS"
+        title.textSize = 30f
+
+        val description = TextView(this)
+        description.text =
+            "Яндекс Circle to Search\n\n" +
+            "Приложение делает скриншот текущего экрана " +
+            "и отправляет его непосредственно в приложение Яндекс."
+
+        description.textSize = 18f
+
+        val status = TextView(this)
+        status.id = android.R.id.text1
+        status.textSize = 18f
+
+        val accessibilityButton = Button(this)
+        accessibilityButton.text = "Включить Accessibility"
+
+        accessibilityButton.setOnClickListener {
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Не удалось открыть настройки Accessibility", e)
+            }
+        }
+
+        val captureButton = Button(this)
+        captureButton.text = "Сделать скриншот и открыть Яндекс"
+
+        captureButton.setOnClickListener {
             requestCapture()
+        }
+
+        layout.addView(title)
+        layout.addView(description)
+        layout.addView(status)
+        layout.addView(accessibilityButton)
+        layout.addView(captureButton)
+
+        setContentView(layout)
+    }
+
+    private fun updateStatus() {
+        val statusView = findViewById<TextView>(android.R.id.text1)
+
+        if (statusView == null) {
+            return
+        }
+
+        if (isAccessibilityEnabled()) {
+            statusView.text =
+                "\nСтатус: Accessibility включён\n" +
+                "Можно делать скриншот."
+        } else {
+            statusView.text =
+                "\nСтатус: Accessibility выключен\n" +
+                "Сначала включите службу YaCTS."
+        }
+    }
+
+    private fun isAccessibilityEnabled(): Boolean {
+        val accessibilityManager =
+            getSystemService(ACCESSIBILITY_SERVICE)
+                    as android.view.accessibility.AccessibilityManager
+
+        val enabledServices =
+            accessibilityManager.getEnabledAccessibilityServiceList(
+                android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
+            )
+
+        return enabledServices.any { service ->
+            service.resolveInfo?.serviceInfo?.packageName == packageName
         }
     }
 
     private fun requestCapture() {
-        waitingForAccessibility = false
-
-        Log.e("YaCTS_TEST", "Requesting screenshot")
+        if (!isAccessibilityEnabled()) {
+            startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            )
+            return
+        }
 
         YaService.requestCapture()
 
+        // Небольшая задержка нужна на случай, если AccessibilityService
+        // ещё не успел получить управление.
         Handler(Looper.getMainLooper()).postDelayed({
             YaService.requestCapture()
         }, 1000)
 
         finish()
     }
-
-    private fun isAccessibilityEnabled(): Boolean {
-        val expected = "$packageName/${YaService::class.java.name}"
-
-        val raw = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-
-        return raw.split(':').any {
-            it.equals(expected, ignoreCase = true)
-        }
-    }
-
-    private fun showSetupScreen() {
-        val root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(Color.parseColor("#101216"))
-        root.setPadding(48, 80, 48, 80)
-
-        val description = TextView(this)
-        description.text =
-            "YaCTS\n\n" +
-            "Один раз включите спец. возможности:\n\n" +
-            "1. Нажмите «Открыть настройки»\n" +
-            "2. Найдите «YaCTS» в списке\n" +
-            "3. Включите и подтвердите\n" +
-            "4. Вернитесь сюда"
-
-        description.setTextColor(Color.WHITE)
-        description.textSize = 18f
-
-        val button = Button(this)
-        button.text = "Открыть настройки"
-
-        button.setOnClickListener {
-            startActivity(
-                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            )
-        }
-
-        root.addView(description)
-        root.addView(button)
-
-        setContentView(root)
-    }
 }
 
 
 class YaService : AccessibilityService() {
 
-    private var isCapturing = false
+    companion object {
+
+        private var instance: YaService? = null
+
+        @Volatile
+        private var captureRequested = false
+
+        @Volatile
+        private var captureInProgress = false
+
+        fun requestCapture() {
+            captureRequested = true
+
+            val service = instance
+
+            if (service != null) {
+                service.captureScreen()
+            }
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
 
         instance = this
 
-        Log.e("YaCTS_TEST", "=== ACCESSIBILITY SERVICE CONNECTED ===")
+        Log.d(TAG, "AccessibilityService подключён")
 
         if (captureRequested) {
-            captureRequested = false
-
-            Handler(Looper.getMainLooper()).postDelayed({
-                captureScreen()
-            }, 300)
+            captureScreen()
         }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Не используется.
+        // Нам не нужны события интерфейса.
     }
 
     override fun onInterrupt() {
-        // Не используется.
+        Log.d(TAG, "AccessibilityService прерван")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+
+        if (instance === this) {
+            instance = null
+        }
+
+        captureInProgress = false
+
+        Log.d(TAG, "AccessibilityService уничтожен")
     }
 
     private fun captureScreen() {
-        if (isCapturing) {
-            Log.e("YaCTS_TEST", "Capture already running")
+
+        if (captureInProgress) {
+            Log.d(TAG, "Скриншот уже создаётся")
             return
         }
 
-        isCapturing = true
+        if (!captureRequested) {
+            return
+        }
 
-        Log.e("YaCTS_TEST", "=== SCREENSHOT REQUEST START ===")
+        captureRequested = false
+        captureInProgress = true
+
+        Log.d(TAG, "Начинаем создание скриншота")
 
         try {
+
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 mainExecutor,
                 object : TakeScreenshotCallback {
 
-                    override fun onSuccess(result: ScreenshotResult) {
-                        Log.e("YaCTS_TEST", "=== SCREENSHOT SUCCESS ===")
+                    override fun onSuccess(
+                        screenshot: ScreenshotResult
+                    ) {
+
+                        Log.d(TAG, "Скриншот получен")
 
                         try {
-                            val hardwareBuffer = result.hardwareBuffer
-                            val colorSpace = result.colorSpace
-
-                            val hardwareBitmap =
-                                Bitmap.wrapHardwareBuffer(
-                                    hardwareBuffer,
-                                    colorSpace
-                                )
-
-                            hardwareBuffer.close()
-
-                            if (hardwareBitmap == null) {
-                                Log.e(
-                                    "YaCTS_TEST",
-                                    "Hardware bitmap is null"
-                                )
-                                isCapturing = false
-                                return
-                            }
 
                             val bitmap =
-                                hardwareBitmap.copy(
-                                    Bitmap.Config.ARGB_8888,
-                                    false
-                                )
-
-                            hardwareBitmap.recycle()
+                                screenshotToBitmap(screenshot)
 
                             if (bitmap == null) {
                                 Log.e(
-                                    "YaCTS_TEST",
-                                    "Software bitmap is null"
+                                    TAG,
+                                    "Не удалось преобразовать скриншот в Bitmap"
                                 )
-                                isCapturing = false
+
+                                captureInProgress = false
                                 return
                             }
 
-                            val output =
-                                ByteArrayOutputStream()
-
-                            bitmap.compress(
-                                Bitmap.CompressFormat.JPEG,
-                                90,
-                                output
-                            )
+                            val imageBytes =
+                                bitmapToJpeg(bitmap)
 
                             bitmap.recycle()
 
-                            val imageBytes =
-                                output.toByteArray()
+                            if (imageBytes == null) {
+                                Log.e(
+                                    TAG,
+                                    "Не удалось создать JPEG"
+                                )
 
-                            Log.e(
-                                "YaCTS_TEST",
-                                "Screenshot converted: ${imageBytes.size} bytes"
+                                captureInProgress = false
+                                return
+                            }
+
+                            Log.d(
+                                TAG,
+                                "JPEG готов: ${imageBytes.size} bytes"
                             )
 
                             sendImageToYandex(imageBytes)
 
-                        } catch (t: Throwable) {
+                        } catch (e: Exception) {
+
                             Log.e(
-                                "YaCTS_TEST",
-                                "Screenshot processing error",
-                                t
+                                TAG,
+                                "Ошибка обработки скриншота",
+                                e
                             )
+
                         } finally {
-                            isCapturing = false
+                            captureInProgress = false
                         }
                     }
 
                     override fun onFailure(errorCode: Int) {
-                        isCapturing = false
 
                         Log.e(
-                            "YaCTS_TEST",
-                            "=== SCREENSHOT FAILURE: $errorCode ==="
+                            TAG,
+                            "Ошибка screenshot. Код: $errorCode"
                         )
+
+                        captureInProgress = false
                     }
                 }
             )
 
-        } catch (t: Throwable) {
-            isCapturing = false
+        } catch (e: Exception) {
 
             Log.e(
-                "YaCTS_TEST",
-                "takeScreenshot threw exception",
-                t
+                TAG,
+                "Ошибка вызова takeScreenshot",
+                e
             )
+
+            captureInProgress = false
         }
     }
 
-    private fun sendImageToYandex(imageBytes: ByteArray) {
+    private fun screenshotToBitmap(
+        screenshot: ScreenshotResult
+    ): Bitmap? {
+
+        val hardwareBuffer =
+            screenshot.hardwareBuffer ?: return null
+
+        val colorSpace =
+            screenshot.colorSpace
+
+        val hardwareBitmap =
+            Bitmap.wrapHardwareBuffer(
+                hardwareBuffer,
+                colorSpace
+            )
+
+        hardwareBuffer.close()
+
+        if (hardwareBitmap == null) {
+            return null
+        }
+
+        val softwareBitmap =
+            hardwareBitmap.copy(
+                Bitmap.Config.ARGB_8888,
+                false
+            )
+
+        hardwareBitmap.recycle()
+
+        return softwareBitmap
+    }
+
+    private fun bitmapToJpeg(
+        bitmap: Bitmap
+    ): ByteArray? {
+
+        val outputStream =
+            ByteArrayOutputStream()
+
+        val success =
+            bitmap.compress(
+                Bitmap.CompressFormat.JPEG,
+                90,
+                outputStream
+            )
+
+        if (!success) {
+            outputStream.close()
+            return null
+        }
+
+        val bytes =
+            outputStream.toByteArray()
+
+        outputStream.close()
+
+        return bytes
+    }
+
+    private fun sendImageToYandex(
+        imageBytes: ByteArray
+    ) {
+
         try {
-            Log.e(
-                "YaCTS_TEST",
-                "Preparing image for com.yandex.searchapp"
+
+            /*
+             * Сохраняем изображение во временный файл.
+             *
+             * Оно НЕ отправляется через HTTP.
+             *
+             * Файл будет передан приложению Яндекс
+             * через Android content:// URI.
+             */
+
+            val cacheDirectory =
+                File(cacheDir, "yacts_images")
+
+            if (!cacheDirectory.exists()) {
+                cacheDirectory.mkdirs()
+            }
+
+            val imageFile =
+                File(
+                    cacheDirectory,
+                    "yacts_${System.currentTimeMillis()}.jpg"
+                )
+
+            imageFile.outputStream().use { output ->
+                output.write(imageBytes)
+            }
+
+            Log.d(
+                TAG,
+                "Изображение сохранено: ${imageFile.absolutePath}"
             )
 
-            val file = File(
-                cacheDir,
-                "yacts_screenshot.jpg"
+            val imageUri: Uri =
+                FileProvider.getUriForFile(
+                    this,
+                    "${packageName}.fileprovider",
+                    imageFile
+                )
+
+            Log.d(
+                TAG,
+                "URI: $imageUri"
             )
 
-            file.writeBytes(imageBytes)
+            val intent =
+                Intent(Intent.ACTION_SEND).apply {
 
-            Log.e(
-                "YaCTS_TEST",
-                "Screenshot saved: ${file.absolutePath}"
-            )
+                    type = "image/jpeg"
 
-            val uri = FileProvider.getUriForFile(
-                this,
-                "${packageName}.fileprovider",
-                file
-            )
+                    putExtra(
+                        Intent.EXTRA_STREAM,
+                        imageUri
+                    )
 
-            Log.e(
-                "YaCTS_TEST",
-                "Content URI: $uri"
-            )
+                    setPackage(YANDEX_PACKAGE)
 
-            val intent = Intent(Intent.ACTION_SEND)
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
 
-            intent.type = "image/jpeg"
-            intent.putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
 
-            intent.setPackage("com.yandex.searchapp")
+            /*
+             * Проверяем, умеет ли установленное приложение Яндекс
+             * принять ACTION_SEND с изображением.
+             */
 
-            intent.addFlags(
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
+            val packageManager =
+                packageManager
 
-            intent.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK
-            )
-
-            val resolved =
+            val resolvedActivity =
                 intent.resolveActivity(packageManager)
 
-            if (resolved == null) {
+            if (resolvedActivity == null) {
+
                 Log.e(
-                    "YaCTS_TEST",
-                    "!!! com.yandex.searchapp DOES NOT ACCEPT ACTION_SEND image/jpeg !!!"
+                    TAG,
+                    "Приложение Яндекс не принимает ACTION_SEND image/jpeg"
                 )
+
+                try {
+                    imageFile.delete()
+                } catch (_: Exception) {
+                }
+
                 return
             }
 
-            Log.e(
-                "YaCTS_TEST",
-                "Resolved activity: $resolved"
-            )
+            /*
+             * Дополнительно выдаём Яндексу разрешение
+             * на чтение content:// URI.
+             */
 
-            grantUriPermission(
-                "com.yandex.searchapp",
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
+            try {
 
-            Log.e(
-                "YaCTS_TEST",
-                "=== SENDING IMAGE TO YANDEX ==="
+                grantUriPermission(
+                    YANDEX_PACKAGE,
+                    imageUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+
+            } catch (e: Exception) {
+
+                Log.w(
+                    TAG,
+                    "Не удалось явно выдать URI permission",
+                    e
+                )
+            }
+
+            Log.d(
+                TAG,
+                "Отправляем изображение в $YANDEX_PACKAGE"
             )
 
             startActivity(intent)
 
+        } catch (e: Exception) {
+
             Log.e(
-                "YaCTS_TEST",
-                "=== IMAGE SENT TO YANDEX ==="
+                TAG,
+                "Ошибка отправки изображения в Яндекс",
+                e
             )
-
-        } catch (t: Throwable) {
-            Log.e(
-                "YaCTS_TEST",
-                "!!! ERROR SENDING IMAGE TO YANDEX !!!",
-                t
-            )
-        }
-    }
-
-    companion object {
-
-        private var instance: YaService? = null
-
-        private var captureRequested = false
-
-        fun requestCapture() {
-            Log.e(
-                "YaCTS_TEST",
-                "YaService.requestCapture()"
-            )
-
-            val service = instance
-
-            if (service != null) {
-                Log.e(
-                    "YaCTS_TEST",
-                    "Service instance exists"
-                )
-
-                Handler(Looper.getMainLooper()).postDelayed({
-                    service.captureScreen()
-                }, 100)
-
-            } else {
-                Log.e(
-                    "YaCTS_TEST",
-                    "Service instance is NULL - waiting for connection"
-                )
-
-                captureRequested = true
-            }
         }
     }
 }
