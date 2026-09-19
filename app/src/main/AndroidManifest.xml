@@ -3,6 +3,16 @@
 <manifest
     xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+        Начиная с Android 11 (API 30) приложение не видит другие
+        установленные пакеты без явного объявления видимости.
+        Без этого блока intent.resolveActivity() для Яндекса
+        всегда будет возвращать null, даже если Яндекс установлен.
+    -->
+    <queries>
+        <package android:name="com.yandex.searchapp" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:label="YaCTS"
