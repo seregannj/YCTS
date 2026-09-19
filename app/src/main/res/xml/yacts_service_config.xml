@@ -2,8 +2,9 @@
 
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeAllMask"
-    android:accessibilityFeedbackType="feedbackGeneric"
-    android:notificationTimeout="100"
+
     android:canTakeScreenshot="true"
-    android:summary="YaCTS — поиск по экрану" />
+
+    android:notificationTimeout="100"
+
+    android:summary="YaCTS — скриншот в Яндекс" />
