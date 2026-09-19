@@ -2,6 +2,7 @@ package ru.yacts.app
 
 import android.accessibilityservice.AccessibilityService
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -16,7 +17,6 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -26,20 +26,17 @@ import java.util.UUID
 
 class MainActivity : Activity() {
 
-    private var setupMode = false
+    private var waitingForAccessibility = false
+
     private val handler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        Log.i(TAG, "YaCTS opened")
-
         if (isAccessibilityEnabled()) {
-            Log.i(TAG, "Accessibility is ENABLED")
             requestCapture()
         } else {
-            Log.i(TAG, "Accessibility is DISABLED")
-            setupMode = true
+            waitingForAccessibility = true
             showSetupScreen()
         }
     }
@@ -47,16 +44,10 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
 
-        if (setupMode) {
-            /*
-             * После выхода из системных настроек AccessibilityService
-             * может подключиться не мгновенно.
-             *
-             * Поэтому проверяем несколько раз с небольшой задержкой.
-             */
+        if (waitingForAccessibility) {
             handler.postDelayed({
                 if (isAccessibilityEnabled()) {
-                    Log.i(TAG, "Accessibility became ENABLED")
+                    waitingForAccessibility = false
                     requestCapture()
                 }
             }, 500)
@@ -68,12 +59,8 @@ class MainActivity : Activity() {
 
         YaService.requestCapture()
 
-        /*
-         * Дополнительная попытка через секунду.
-         *
-         * Она нужна на случай, если Android ещё не успел
-         * подключить AccessibilityService.
-         */
+        // Небольшая повторная попытка на случай,
+        // если AccessibilityService ещё не успел подключиться.
         handler.postDelayed({
             YaService.requestCapture()
         }, 1000)
@@ -82,8 +69,7 @@ class MainActivity : Activity() {
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val expected =
-            "$packageName/${YaService::class.java.name}"
+        val expected = "$packageName/${YaService::class.java.name}"
 
         val enabledServices = Settings.Secure.getString(
             contentResolver,
@@ -92,9 +78,7 @@ class MainActivity : Activity() {
 
         return enabledServices
             .split(':')
-            .any {
-                it.equals(expected, ignoreCase = true)
-            }
+            .any { it.equals(expected, ignoreCase = true) }
     }
 
     private fun showSetupScreen() {
@@ -104,19 +88,30 @@ class MainActivity : Activity() {
             setPadding(48, 80, 48, 80)
         }
 
-        val txt = TextView(this).apply {
-            text =
-                "YaCTS\n\n" +
-                "Один раз включите спец. возможности:\n\n" +
-                "1. Нажмите «Открыть настройки»\n" +
-                "2. Найдите «YaCTS»\n" +
-                "3. Включите службу\n" +
-                "4. Вернитесь назад"
+        val title = TextView(this).apply {
+            text = "YaCTS"
+            setTextColor(Color.WHITE)
+            textSize = 28f
+        }
+
+        val text = TextView(this).apply {
+            text = """
+                
+                Для работы YaCTS нужно один раз включить специальную возможность.
+
+                1. Нажмите «Открыть настройки»
+                2. Найдите YaCTS
+                3. Включите службу
+                4. Вернитесь в YaCTS
+
+                После этого скриншот будет делаться автоматически.
+            """.trimIndent()
+
             setTextColor(Color.WHITE)
             textSize = 18f
         }
 
-        val btn = Button(this).apply {
+        val button = Button(this).apply {
             text = "Открыть настройки"
 
             setOnClickListener {
@@ -126,8 +121,17 @@ class MainActivity : Activity() {
             }
         }
 
-        root.addView(txt)
-        root.addView(btn)
+        root.addView(title)
+        root.addView(text)
+
+        val params = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+
+        params.topMargin = 50
+
+        root.addView(button, params)
 
         setContentView(root)
     }
@@ -154,14 +158,12 @@ class YaService : AccessibilityService() {
         private var captureInProgress = false
 
         /**
-         * MainActivity вызывает этот метод.
+         * Запрашивает создание скриншота.
          *
-         * AccessibilityService при этом НЕ запускается через
-         * startService().
+         * Если сервис уже подключён — запускаем сразу.
          *
-         * Если сервис уже подключён — screenshot делается сразу.
-         * Если Android ещё подключает сервис — запрос запоминается
-         * и будет выполнен в onServiceConnected().
+         * Если Android ещё не успел подключить AccessibilityService,
+         * запрос сохраняется и будет выполнен в onServiceConnected().
          */
         fun requestCapture() {
             Log.i(TAG, "requestCapture()")
@@ -175,10 +177,7 @@ class YaService : AccessibilityService() {
                     service.processCaptureRequest()
                 }
             } else {
-                Log.i(
-                    TAG,
-                    "Service is not connected yet. Waiting for onServiceConnected()"
-                )
+                Log.i(TAG, "Service is not connected yet")
             }
         }
     }
@@ -188,13 +187,34 @@ class YaService : AccessibilityService() {
 
         instance = this
 
-        Log.i(TAG, "AccessibilityService CONNECTED")
+        Log.i(TAG, "AccessibilityService connected")
 
         if (captureRequested) {
             mainExecutor.execute {
                 processCaptureRequest()
             }
         }
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // События Accessibility здесь не нужны.
+    }
+
+    override fun onInterrupt() {
+        Log.i(TAG, "AccessibilityService interrupted")
+    }
+
+    override fun onDestroy() {
+        Log.i(TAG, "AccessibilityService destroyed")
+
+        if (instance === this) {
+            instance = null
+        }
+
+        captureRequested = false
+        captureInProgress = false
+
+        super.onDestroy()
     }
 
     private fun processCaptureRequest() {
@@ -215,31 +235,15 @@ class YaService : AccessibilityService() {
         captureScreen()
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Нам не нужны Accessibility events.
-    }
-
-    override fun onInterrupt() {
-        Log.i(TAG, "AccessibilityService interrupted")
-    }
-
-    override fun onDestroy() {
-        Log.i(TAG, "AccessibilityService destroyed")
-
-        instance = null
-        captureRequested = false
-        captureInProgress = false
-
-        super.onDestroy()
-    }
-
-    /**
-     * Получает screenshot текущего экрана.
-     */
     private fun captureScreen() {
-
         try {
 
+            /*
+             * ВАЖНО:
+             *
+             * Для Android 30+ здесь обязательно указывается
+             * Display.DEFAULT_DISPLAY.
+             */
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 mainExecutor,
@@ -247,41 +251,40 @@ class YaService : AccessibilityService() {
 
                     override fun onSuccess(result: ScreenshotResult) {
 
-                        Log.i(TAG, "Screenshot SUCCESS")
+                        Log.i(TAG, "Screenshot captured")
 
                         try {
 
                             val hardwareBuffer = result.hardwareBuffer
                             val colorSpace = result.colorSpace
 
-                            val hardwareBitmap =
-                                Bitmap.wrapHardwareBuffer(
-                                    hardwareBuffer,
-                                    colorSpace
-                                )
+                            val hardwareBitmap = Bitmap.wrapHardwareBuffer(
+                                hardwareBuffer,
+                                colorSpace
+                            )
 
                             hardwareBuffer.close()
 
                             if (hardwareBitmap == null) {
-                                Log.e(
-                                    TAG,
-                                    "Bitmap.wrapHardwareBuffer returned null"
-                                )
-
+                                Log.e(TAG, "Bitmap is null")
                                 captureInProgress = false
                                 return
                             }
 
-                            val bitmap =
-                                hardwareBitmap.copy(
-                                    Bitmap.Config.ARGB_8888,
-                                    false
-                                )
+                            val bitmap = hardwareBitmap.copy(
+                                Bitmap.Config.ARGB_8888,
+                                false
+                            )
 
                             hardwareBitmap.recycle()
 
-                            val output =
-                                ByteArrayOutputStream()
+                            if (bitmap == null) {
+                                Log.e(TAG, "Failed to create software bitmap")
+                                captureInProgress = false
+                                return
+                            }
+
+                            val output = ByteArrayOutputStream()
 
                             bitmap.compress(
                                 Bitmap.CompressFormat.JPEG,
@@ -291,25 +294,22 @@ class YaService : AccessibilityService() {
 
                             bitmap.recycle()
 
-                            val imageBytes =
-                                output.toByteArray()
+                            val imageBytes = output.toByteArray()
 
                             Log.i(
                                 TAG,
-                                "Screenshot converted: ${imageBytes.size} bytes"
+                                "Screenshot JPEG size: ${imageBytes.size} bytes"
                             )
 
-                            /*
-                             * Сеть выполняем не в main thread.
-                             */
                             Thread {
-
-                                uploadAndOpen(imageBytes)
-
+                                try {
+                                    uploadAndOpen(imageBytes)
+                                } finally {
+                                    captureInProgress = false
+                                }
                             }.start()
 
                         } catch (e: Throwable) {
-
                             Log.e(
                                 TAG,
                                 "Error processing screenshot",
@@ -324,7 +324,7 @@ class YaService : AccessibilityService() {
 
                         Log.e(
                             TAG,
-                            "Screenshot FAILED. Error code: $errorCode"
+                            "Screenshot failed. Error code: $errorCode"
                         )
 
                         captureInProgress = false
@@ -336,7 +336,7 @@ class YaService : AccessibilityService() {
 
             Log.e(
                 TAG,
-                "takeScreenshot() threw exception",
+                "takeScreenshot() exception",
                 e
             )
 
@@ -344,40 +344,23 @@ class YaService : AccessibilityService() {
         }
     }
 
-    /**
-     * Отправляет screenshot в Yandex.
-     */
     private fun uploadAndOpen(imageBytes: ByteArray) {
 
         try {
 
-            Log.i(TAG, "Uploading screenshot to Yandex...")
+            Log.i(TAG, "Uploading screenshot to Yandex")
 
-            val cbirQuery =
-                uploadToYandex(imageBytes)
+            val cbirQuery = uploadToYandex(imageBytes)
 
             if (cbirQuery == null) {
-
-                Log.e(
-                    TAG,
-                    "Yandex upload failed"
-                )
-
-                captureInProgress = false
+                Log.e(TAG, "Yandex upload failed")
                 return
             }
 
             val fullUrl =
-                if (cbirQuery.startsWith("http")) {
-                    cbirQuery
-                } else {
-                    "https://yandex.com/images/search?$cbirQuery"
-                }
+                "https://yandex.com/images/search?$cbirQuery"
 
-            Log.i(
-                TAG,
-                "Yandex URL: $fullUrl"
-            )
+            Log.i(TAG, "Yandex URL: $fullUrl")
 
             openYandex(fullUrl)
 
@@ -388,147 +371,119 @@ class YaService : AccessibilityService() {
                 "uploadAndOpen() error",
                 e
             )
-
-        } finally {
-
-            captureInProgress = false
         }
     }
 
-    /**
-     * Открывает результат в приложении Yandex.
-     */
     private fun openYandex(url: String) {
 
         val uri = Uri.parse(url)
 
         /*
-         * Основная цель — приложение Yandex.
+         * Сначала пробуем приложения Яндекса.
          *
-         * У разных версий Yandex package может отличаться,
-         * поэтому пробуем несколько вариантов.
+         * Разные версии Android/Яндекс используют разные package name,
+         * поэтому проверяем несколько вариантов.
          */
-        val packages = listOf(
+        val yandexPackages = listOf(
+            "ru.yandex.searchplugin",
             "ru.yandex.searchapp",
-            "ru.yandex.yandexmaps",
             "ru.yandex.yandexbrowser",
             "ru.yandex.browser",
             "com.yandex.browser"
         )
 
-        for (packageName in packages) {
+        for (packageName in yandexPackages) {
 
             try {
 
-                val intent =
-                    Intent(
-                        Intent.ACTION_VIEW,
-                        uri
-                    ).apply {
-
-                        setPackage(packageName)
-
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK
-                        )
-                    }
-
-                if (intent.resolveActivity(packageManager) != null) {
-
-                    Log.i(
-                        TAG,
-                        "Opening Yandex package: $packageName"
-                    )
-
-                    startActivity(intent)
-                    return
+                val intent = Intent(
+                    Intent.ACTION_VIEW,
+                    uri
+                ).apply {
+                    setPackage(packageName)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
 
+                startActivity(intent)
+
+                Log.i(
+                    TAG,
+                    "Opened Yandex package: $packageName"
+                )
+
+                return
+
+            } catch (_: ActivityNotFoundException) {
+                // Пробуем следующий пакет.
             } catch (e: Throwable) {
 
                 Log.e(
                     TAG,
-                    "Failed to open package $packageName",
+                    "Error opening package $packageName",
                     e
                 )
             }
         }
 
         /*
-         * Если конкретное приложение не найдено,
-         * используем обычный Android resolver.
+         * Если конкретное приложение Яндекса не найдено,
+         * открываем URL обычным ACTION_VIEW.
          */
         try {
 
-            Log.i(
-                TAG,
-                "Yandex app not found. Opening generic browser."
-            )
+            val fallbackIntent = Intent(
+                Intent.ACTION_VIEW,
+                uri
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
 
-            val intent =
-                Intent(
-                    Intent.ACTION_VIEW,
-                    uri
-                ).apply {
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
-                }
+            startActivity(fallbackIntent)
 
-            startActivity(intent)
+            Log.i(TAG, "Opened Yandex URL using default browser")
 
         } catch (e: Throwable) {
 
             Log.e(
                 TAG,
-                "Cannot open URL",
+                "Could not open Yandex URL",
                 e
             )
         }
     }
 
-    /**
-     * HTTP upload изображения в Yandex Images.
-     */
     private fun uploadToYandex(
         imageBytes: ByteArray
     ): String? {
 
         val boundary =
-            "----YaCTS${UUID.randomUUID()}"
-                .replace("-", "")
+            "----YaCTS${UUID.randomUUID().toString().replace("-", "")}"
 
         val requestJson =
-            """
-            {
-              "blocks": [
-                {
-                  "block": "b-page_type_search-by-image__link"
-                }
-              ]
-            }
-            """.trimIndent()
+            "{\"blocks\":[{\"block\":\"b-page_type_search-by-image__link\"}]}"
+
+        val encodedRequest =
+            URLEncoder.encode(
+                requestJson,
+                "UTF-8"
+            )
 
         val urlString =
             "https://yandex.com/images/search" +
                     "?rpt=imageview" +
                     "&format=json" +
-                    "&request=" +
-                    URLEncoder.encode(
-                        requestJson,
-                        "UTF-8"
-                    )
+                    "&request=$encodedRequest"
 
         val connection =
-            (URL(urlString).openConnection()
-                    as HttpURLConnection).apply {
+            (URL(urlString).openConnection() as HttpURLConnection).apply {
 
                 requestMethod = "POST"
 
                 doOutput = true
+                doInput = true
 
-                connectTimeout = 30000
-                readTimeout = 30000
+                connectTimeout = 30_000
+                readTimeout = 30_000
 
                 setRequestProperty(
                     "Content-Type",
@@ -537,10 +492,12 @@ class YaService : AccessibilityService() {
 
                 setRequestProperty(
                     "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 13) " +
+                    "Mozilla/5.0 " +
+                            "(Linux; Android 13) " +
                             "AppleWebKit/537.36 " +
                             "(KHTML, like Gecko) " +
-                            "Chrome/120.0.0.0 Mobile Safari/537.36"
+                            "Chrome/120.0.0.0 " +
+                            "Mobile Safari/537.36"
                 )
 
                 setRequestProperty(
@@ -559,23 +516,20 @@ class YaService : AccessibilityService() {
 
                 output.write(
                     (
-                        "Content-Disposition: " +
-                                "form-data; " +
+                        "Content-Disposition: form-data; " +
                                 "name=\"upfile\"; " +
                                 "filename=\"screenshot.jpg\"\r\n"
-                        ).toByteArray()
+                    ).toByteArray()
                 )
 
                 output.write(
-                    "Content-Type: image/jpeg\r\n\r\n"
-                        .toByteArray()
+                    "Content-Type: image/jpeg\r\n\r\n".toByteArray()
                 )
 
                 output.write(imageBytes)
 
                 output.write(
-                    "\r\n--$boundary--\r\n"
-                        .toByteArray()
+                    "\r\n--$boundary--\r\n".toByteArray()
                 )
             }
 
@@ -587,7 +541,7 @@ class YaService : AccessibilityService() {
                 "Yandex HTTP response: $responseCode"
             )
 
-            val stream =
+            val responseStream =
                 if (responseCode in 200..299) {
                     connection.inputStream
                 } else {
@@ -595,21 +549,21 @@ class YaService : AccessibilityService() {
                 }
 
             val response =
-                stream
+                responseStream
                     ?.bufferedReader()
                     ?.use { it.readText() }
                     ?: ""
 
             Log.d(
                 TAG,
-                "Yandex response: ${response.take(2000)}"
+                "Yandex response: ${response.take(1000)}"
             )
 
             if (responseCode !in 200..299) {
 
                 Log.e(
                     TAG,
-                    "Yandex returned HTTP $responseCode"
+                    "Yandex HTTP error $responseCode"
                 )
 
                 return null
@@ -633,120 +587,66 @@ class YaService : AccessibilityService() {
         }
     }
 
-    /**
-     * Пытается достать URL результата из ответа Yandex.
-     *
-     * Здесь оставлено несколько вариантов,
-     * потому что формат ответа Yandex может различаться.
-     */
     private fun parseCbirUrl(
-        response: String
+        jsonString: String
     ): String? {
 
-        /*
-         * Вариант 1 — обычный JSON.
-         */
-        try {
+        return try {
 
             val json =
-                JSONObject(response)
+                JSONObject(jsonString)
 
-            val directUrl =
-                json.optString("url", "")
+            /*
+             * Вариант 1:
+             *
+             * {
+             *   "blocks": {
+             *      "params": {
+             *          "url": "..."
+             *      }
+             *   }
+             * }
+             */
+            try {
 
-            if (directUrl.isNotEmpty()) {
-                return directUrl
+                val blocks =
+                    json.getJSONObject("blocks")
+
+                val params =
+                    blocks.getJSONObject("params")
+
+                return params.getString("url")
+
+            } catch (_: Throwable) {
+                // Пробуем другой формат.
             }
 
-            val cbirUrl =
-                json.optString("cbirUrl", "")
+            /*
+             * Вариант 2:
+             *
+             * {
+             *     "url": "..."
+             * }
+             */
+            try {
 
-            if (cbirUrl.isNotEmpty()) {
-                return cbirUrl
+                return json.getString("url")
+
+            } catch (_: Throwable) {
+                // URL не найден.
             }
 
-            val cbirId =
-                json.optString("cbir_id", "")
+            null
 
-            if (cbirId.isNotEmpty()) {
+        } catch (e: Throwable) {
 
-                return "rpt=imageview&cbir_id=" +
-                        URLEncoder.encode(
-                            cbirId,
-                            "UTF-8"
-                        )
-            }
+            Log.e(
+                TAG,
+                "Could not parse Yandex response",
+                e
+            )
 
-        } catch (_: Throwable) {
-            // Продолжаем поиск.
+            null
         }
-
-        /*
-         * Вариант 2 — blocks может быть массивом.
-         */
-        try {
-
-            val json =
-                JSONObject(response)
-
-            val blocks =
-                json.opt("blocks")
-
-            if (blocks is JSONArray) {
-
-                for (i in 0 until blocks.length()) {
-
-                    val block =
-                        blocks.optJSONObject(i)
-                            ?: continue
-
-                    val params =
-                        block.optJSONObject("params")
-
-                    val url =
-                        params?.optString(
-                            "url",
-                            ""
-                        ) ?: ""
-
-                    if (url.isNotEmpty()) {
-                        return url
-                    }
-
-                    val direct =
-                        block.optString(
-                            "url",
-                            ""
-                        )
-
-                    if (direct.isNotEmpty()) {
-                        return direct
-                    }
-                }
-            }
-
-        } catch (_: Throwable) {
-            // Ниже fallback.
-        }
-
-        /*
-         * Вариант 3 — иногда URL можно найти прямо
-         * в текстовом ответе.
-         */
-        val match =
-            Regex(
-                """https?://[^"\s]+"""
-            ).find(response)
-
-        if (match != null) {
-            return match.value
-        }
-
-        Log.e(
-            TAG,
-            "Could not find Yandex result URL"
-        )
-
-        return null
     }
 }
