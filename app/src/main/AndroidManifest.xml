@@ -1,24 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
+        android:allowBackup="true"
         android:label="YaCTS"
-        android:icon="@drawable/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher"
-        android:allowBackup="false"
-        android:theme="@android:style/Theme.NoTitleBar">
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
+        <!-- Главное Activity -->
         <activity
             android:name=".MainActivity"
-            android:exported="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:excludeFromRecents="true"
-            android:noHistory="true"
-            android:taskAffinity="">
+            android:exported="true">
 
             <intent-filter>
 
@@ -33,11 +27,11 @@
         </activity>
 
 
+        <!-- Accessibility Service -->
         <service
             android:name=".YaService"
-            android:exported="true"
-            android:label="YaCTS"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
 
             <intent-filter>
 
@@ -52,6 +46,11 @@
 
         </service>
 
+
+        <!--
+            FileProvider нужен для передачи JPEG
+            непосредственно приложению Яндекс.
+        -->
 
         <provider
             android:name="androidx.core.content.FileProvider"
