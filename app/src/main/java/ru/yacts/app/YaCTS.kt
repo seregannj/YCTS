@@ -16,9 +16,6 @@ import android.util.Log
 import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.ByteArrayOutputStream
@@ -30,44 +27,23 @@ private const val YANDEX_PACKAGE = "com.yandex.searchapp"
 
 class MainActivity : android.app.Activity() {
 
+    /*
+     * У этой Activity нет своего интерфейса (тема Theme.NoDisplay
+     * в манифесте). При каждом запуске она сразу:
+     *  - если Accessibility включён — запускает скриншот и закрывается;
+     *  - если нет — один раз открывает системные настройки Accessibility
+     *    и закрывается, чтобы больше никогда не показывать никакого окна.
+     *
+     * Т.к. тема NoDisplay, finish() (или запуск другой Activity) должен
+     * быть вызван синхронно в onCreate — иначе система выбросит ошибку.
+     */
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        showMainScreen()
-    }
-
-    override fun onResume() {
-        super.onResume()
-
-        updateStatus()
-    }
-
-    private fun showMainScreen() {
-        val layout = LinearLayout(this)
-
-        layout.orientation = LinearLayout.VERTICAL
-        layout.setPadding(50, 80, 50, 50)
-
-        val title = TextView(this)
-        title.text = "YaCTS"
-        title.textSize = 30f
-
-        val description = TextView(this)
-        description.text =
-            "Яндекс Circle to Search\n\n" +
-            "Приложение делает скриншот текущего экрана " +
-            "и отправляет его непосредственно в приложение Яндекс."
-
-        description.textSize = 18f
-
-        val status = TextView(this)
-        status.id = android.R.id.text1
-        status.textSize = 18f
-
-        val accessibilityButton = Button(this)
-        accessibilityButton.text = "Включить Accessibility"
-
-        accessibilityButton.setOnClickListener {
+        if (isAccessibilityEnabled()) {
+            requestCapture()
+        } else {
             try {
                 startActivity(
                     Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
@@ -77,38 +53,7 @@ class MainActivity : android.app.Activity() {
             }
         }
 
-        val captureButton = Button(this)
-        captureButton.text = "Сделать скриншот и открыть Яндекс"
-
-        captureButton.setOnClickListener {
-            requestCapture()
-        }
-
-        layout.addView(title)
-        layout.addView(description)
-        layout.addView(status)
-        layout.addView(accessibilityButton)
-        layout.addView(captureButton)
-
-        setContentView(layout)
-    }
-
-    private fun updateStatus() {
-        val statusView = findViewById<TextView>(android.R.id.text1)
-
-        if (statusView == null) {
-            return
-        }
-
-        if (isAccessibilityEnabled()) {
-            statusView.text =
-                "\nСтатус: Accessibility включён\n" +
-                "Можно делать скриншот."
-        } else {
-            statusView.text =
-                "\nСтатус: Accessibility выключен\n" +
-                "Сначала включите службу YaCTS."
-        }
+        finish()
     }
 
     private fun isAccessibilityEnabled(): Boolean {
@@ -127,13 +72,6 @@ class MainActivity : android.app.Activity() {
     }
 
     private fun requestCapture() {
-        if (!isAccessibilityEnabled()) {
-            startActivity(
-                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            )
-            return
-        }
-
         YaService.requestCapture()
 
         // Небольшая задержка нужна на случай, если AccessibilityService
@@ -141,8 +79,6 @@ class MainActivity : android.app.Activity() {
         Handler(Looper.getMainLooper()).postDelayed({
             YaService.requestCapture()
         }, 1000)
-
-        finish()
     }
 }
 
