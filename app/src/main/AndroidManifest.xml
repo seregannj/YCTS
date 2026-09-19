@@ -1,4 +1,4 @@
- <?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 
 <manifest
     xmlns:android="http://schemas.android.com/apk/res/android">
@@ -20,12 +20,7 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
-        <!--
-            Главное Activity работает как "trampoline":
-            своего интерфейса не показывает, а сразу либо
-            запускает скриншот, либо открывает настройки
-            Accessibility и закрывается.
-        -->
+        <!-- Главное Activity: интерфейса не показывает, сразу запускает скриншот или открывает настройки Accessibility и закрывается -->
         <activity
             android:name=".MainActivity"
             android:theme="@android:style/Theme.NoDisplay"
