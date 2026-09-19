@@ -27,17 +27,6 @@ private const val YANDEX_PACKAGE = "com.yandex.searchapp"
 
 class MainActivity : android.app.Activity() {
 
-    /*
-     * У этой Activity нет своего интерфейса (тема Theme.NoDisplay
-     * в манифесте). При каждом запуске она сразу:
-     *  - если Accessibility включён — запускает скриншот и закрывается;
-     *  - если нет — один раз открывает системные настройки Accessibility
-     *    и закрывается, чтобы больше никогда не показывать никакого окна.
-     *
-     * Т.к. тема NoDisplay, finish() (или запуск другой Activity) должен
-     * быть вызван синхронно в onCreate — иначе система выбросит ошибку.
-     */
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
