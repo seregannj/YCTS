@@ -2,6 +2,7 @@ package ru.yacts.app
 
 import android.accessibilityservice.AccessibilityService
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -9,10 +10,12 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -20,16 +23,15 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.UUID
 
-private const val ACTION_CAPTURE = "ru.yacts.app.CAPTURE"
-
 class MainActivity : Activity() {
 
     private var inSetup = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         if (isAccessibilityEnabled()) {
-            triggerCaptureAndFinish()
+            requestCaptureAndFinish()
         } else {
             inSetup = true
             showSetupScreen()
@@ -38,23 +40,39 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+
         if (inSetup && isAccessibilityEnabled()) {
-            triggerCaptureAndFinish()
+            requestCaptureAndFinish()
         }
     }
 
-    private fun triggerCaptureAndFinish() {
-        startService(Intent(this, YaService::class.java).setAction(ACTION_CAPTURE))
+    /**
+     * AccessibilityService нельзя запускать через startService().
+     *
+     * Сервис запускается самой Android-системой после того,
+     * как пользователь включил его в настройках.
+     *
+     * Поэтому мы только передаём ему запрос на скриншот.
+     */
+    private fun requestCaptureAndFinish() {
+        YaService.requestCapture()
         finish()
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val expected = "$packageName/${YaService::class.java.name}"
+        val expected = ComponentName(
+            this,
+            YaService::class.java
+        ).flattenToString()
+
         val raw = Settings.Secure.getString(
             contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return raw.split(':').any { it.equals(expected, ignoreCase = true) }
+
+        return raw.split(':').any {
+            it.equals(expected, ignoreCase = true)
+        }
     }
 
     private fun showSetupScreen() {
@@ -63,6 +81,7 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.parseColor("#101216"))
             setPadding(48, 80, 48, 80)
         }
+
         val txt = TextView(this).apply {
             text = "YaCTS\n\n" +
                     "Один раз включите спец. возможности:\n\n" +
@@ -73,168 +92,595 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             textSize = 18f
         }
+
         val btn = Button(this).apply {
             text = "Открыть настройки"
+
             setOnClickListener {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                )
             }
         }
+
         root.addView(txt)
         root.addView(btn)
+
         setContentView(root)
     }
 }
 
+
 class YaService : AccessibilityService() {
+
+    companion object {
+
+        private const val TAG = "YaCTS"
+
+        @Volatile
+        private var instance: YaService? = null
+
+        @Volatile
+        private var captureRequested = false
+
+        /**
+         * Вызывается MainActivity.
+         *
+         * Если сервис уже подключён — сразу делаем скриншот.
+         *
+         * Если Android ещё не успел вызвать onServiceConnected(),
+         * запоминаем запрос и выполним его сразу после подключения.
+         */
+        fun requestCapture() {
+            captureRequested = true
+
+            instance?.let {
+                captureRequested = false
+                it.captureScreen()
+            }
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Log.i(TAG, "Service connected")
+
+        instance = this
+
+        Log.i(TAG, "Accessibility service connected")
+
+        /*
+         * MainActivity могла отправить запрос буквально
+         * в момент, когда Android ещё подключал сервис.
+         */
+        if (captureRequested) {
+            captureRequested = false
+
+            /*
+             * Небольшая задержка даёт системе закончить
+             * переключение из настроек Accessibility.
+             */
+            mainExecutor.execute {
+                captureScreen()
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Не используется — сервис управляется через startService с action
+        // Нам не нужны accessibility events.
     }
 
     override fun onInterrupt() {
-        // Не используется
+        // Ничего делать не нужно.
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_CAPTURE) {
-            captureScreen()
-        }
-        return START_NOT_STICKY
+    override fun onDestroy() {
+        instance = null
+        captureRequested = false
+
+        Log.i(TAG, "Accessibility service destroyed")
+
+        super.onDestroy()
     }
 
+    /**
+     * Получаем скриншот всего основного дисплея.
+     *
+     * API 30+:
+     * takeScreenshot(displayId, executor, callback)
+     */
     private fun captureScreen() {
         try {
-            takeScreenshot(mainExecutor, object : TakeScreenshotCallback {
-                override fun onSuccess(result: ScreenshotResult) {
-                    val hw = result.hardwareBuffer
-                    val cs = result.colorSpace
-                    val hardBmp = Bitmap.wrapHardwareBuffer(hw, cs)
-                    hw.close()
-                    if (hardBmp == null) {
-                        Log.e(TAG, "Bitmap is null")
-                        return
+            Log.i(TAG, "Starting screenshot...")
+
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+
+                    override fun onSuccess(
+                        result: ScreenshotResult
+                    ) {
+                        var hardwareBufferClosed = false
+
+                        try {
+                            val hardwareBuffer =
+                                result.hardwareBuffer
+
+                            if (hardwareBuffer == null) {
+                                Log.e(
+                                    TAG,
+                                    "Screenshot returned null HardwareBuffer"
+                                )
+                                return
+                            }
+
+                            try {
+                                val hardwareBitmap =
+                                    Bitmap.wrapHardwareBuffer(
+                                        hardwareBuffer,
+                                        result.colorSpace
+                                    )
+
+                                if (hardwareBitmap == null) {
+                                    Log.e(
+                                        TAG,
+                                        "Bitmap.wrapHardwareBuffer() returned null"
+                                    )
+                                    return
+                                }
+
+                                /*
+                                 * Переводим hardware bitmap
+                                 * в обычный ARGB_8888 bitmap.
+                                 */
+                                val bitmap =
+                                    hardwareBitmap.copy(
+                                        Bitmap.Config.ARGB_8888,
+                                        false
+                                    )
+
+                                hardwareBitmap.recycle()
+
+                                if (bitmap == null) {
+                                    Log.e(
+                                        TAG,
+                                        "Bitmap copy returned null"
+                                    )
+                                    return
+                                }
+
+                                val output =
+                                    ByteArrayOutputStream()
+
+                                bitmap.compress(
+                                    Bitmap.CompressFormat.JPEG,
+                                    85,
+                                    output
+                                )
+
+                                bitmap.recycle()
+
+                                val bytes =
+                                    output.toByteArray()
+
+                                output.close()
+
+                                Log.i(
+                                    TAG,
+                                    "Screenshot ready: ${bytes.size} bytes"
+                                )
+
+                                /*
+                                 * Сеть выполняем НЕ в main thread.
+                                 */
+                                Thread {
+                                    uploadAndOpen(bytes)
+                                }.start()
+
+                            } finally {
+                                hardwareBuffer.close()
+                                hardwareBufferClosed = true
+                            }
+
+                        } catch (t: Throwable) {
+                            Log.e(
+                                TAG,
+                                "Error processing screenshot",
+                                t
+                            )
+
+                            if (!hardwareBufferClosed) {
+                                try {
+                                    result.hardwareBuffer?.close()
+                                } catch (_: Throwable) {
+                                }
+                            }
+                        }
                     }
-                    val soft = hardBmp.copy(Bitmap.Config.ARGB_8888, false)
-                    hardBmp.recycle()
 
-                    val baos = ByteArrayOutputStream()
-                    soft.compress(Bitmap.CompressFormat.JPEG, 85, baos)
-                    soft.recycle()
-                    val bytes = baos.toByteArray()
-                    Log.i(TAG, "Screenshot: ${bytes.size} bytes")
-
-                    Thread { uploadAndOpen(bytes) }.start()
+                    override fun onFailure(errorCode: Int) {
+                        Log.e(
+                            TAG,
+                            "Screenshot failed. Error code: $errorCode"
+                        )
+                    }
                 }
+            )
 
-                override fun onFailure(errorCode: Int) {
-                    Log.e(TAG, "Screenshot failed: $errorCode")
-                }
-            })
         } catch (t: Throwable) {
-            Log.e(TAG, "takeScreenshot threw", t)
+            Log.e(
+                TAG,
+                "takeScreenshot() threw exception",
+                t
+            )
         }
     }
 
+    /**
+     * Загружает изображение в Yandex Images
+     * и открывает полученный поиск.
+     */
     private fun uploadAndOpen(bytes: ByteArray) {
         try {
-            val cbirQuery = uploadToYandex(bytes) ?: run {
-                Log.e(TAG, "Upload failed: no cbir url")
+            Log.i(TAG, "Uploading screenshot to Yandex...")
+
+            val cbirQuery = uploadToYandex(bytes)
+
+            if (cbirQuery.isNullOrBlank()) {
+                Log.e(
+                    TAG,
+                    "Yandex upload failed: CBIR URL is empty"
+                )
                 return
             }
-            val fullUrl = "https://yandex.com/images/search?$cbirQuery"
-            Log.i(TAG, "Opening: $fullUrl")
 
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(fullUrl)).apply {
+            /*
+             * Ответ Yandex может вернуть как полный URL,
+             * так и query-параметры.
+             */
+            val fullUrl =
+                if (
+                    cbirQuery.startsWith("http://") ||
+                    cbirQuery.startsWith("https://")
+                ) {
+                    cbirQuery
+                } else {
+                    "https://yandex.com/images/search?$cbirQuery"
+                }
+
+            Log.i(TAG, "Opening Yandex: $fullUrl")
+
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse(fullUrl)
+            ).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
-            for (pkg in listOf(
+            /*
+             * Сначала пробуем Yandex Browser.
+             */
+            val yandexPackages = listOf(
                 "ru.yandex.yandexbrowser",
                 "ru.yandex.browser",
                 "com.yandex.browser"
-            )) {
-                intent.setPackage(pkg)
-                if (intent.resolveActivity(packageManager) != null) {
-                    startActivity(intent)
+            )
+
+            for (pkg in yandexPackages) {
+                val browserIntent =
+                    Intent(intent).apply {
+                        setPackage(pkg)
+                    }
+
+                if (
+                    browserIntent.resolveActivity(
+                        packageManager
+                    ) != null
+                ) {
+                    startActivity(browserIntent)
                     return
                 }
             }
+
+            /*
+             * Если Yandex Browser нет —
+             * открываем обычным браузером.
+             */
             intent.setPackage(null)
-            startActivity(intent)
+
+            if (
+                intent.resolveActivity(packageManager) != null
+            ) {
+                startActivity(intent)
+            } else {
+                Log.e(
+                    TAG,
+                    "No browser available"
+                )
+            }
+
         } catch (t: Throwable) {
-            Log.e(TAG, "uploadAndOpen error", t)
+            Log.e(
+                TAG,
+                "uploadAndOpen() failed",
+                t
+            )
         }
     }
 
-    private fun uploadToYandex(imageBytes: ByteArray): String? {
-        val boundary = "----YaCTS${UUID.randomUUID().toString().replace("-", "")}"
-        val requestJson = "{\"blocks\":[{\"block\":\"b-page_type_search-by-image__link\"}]}"
-        val urlStr = "https://yandex.com/images/search" +
-                "?rpt=imageview" +
-                "&format=json" +
-                "&request=${URLEncoder.encode(requestJson, "UTF-8")}"
+    /**
+     * Загружает JPEG в Yandex Images.
+     */
+    private fun uploadToYandex(
+        imageBytes: ByteArray
+    ): String? {
 
-        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = 30000
-            readTimeout = 30000
-            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-            setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 " +
-                        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        val boundary =
+            "----YaCTS${UUID.randomUUID()}"
+                .replace("-", "")
+
+        val requestJson =
+            """
+            {
+              "blocks": [
+                {
+                  "block": "b-page_type_search-by-image__link"
+                }
+              ]
+            }
+            """.trimIndent()
+
+        val encodedRequest =
+            URLEncoder.encode(
+                requestJson,
+                "UTF-8"
             )
-            setRequestProperty("Accept", "application/json, text/plain, */*")
-        }
+
+        val urlStr =
+            "https://yandex.com/images/search" +
+                    "?rpt=imageview" +
+                    "&format=json" +
+                    "&request=$encodedRequest"
+
+        var connection: HttpURLConnection? = null
 
         try {
-            conn.outputStream.use { out ->
-                out.write("--$boundary\r\n".toByteArray())
+            connection =
+                (URL(urlStr).openConnection()
+                        as HttpURLConnection).apply {
+
+                    requestMethod = "POST"
+
+                    doOutput = true
+                    doInput = true
+
+                    connectTimeout = 30_000
+                    readTimeout = 30_000
+
+                    setRequestProperty(
+                        "Content-Type",
+                        "multipart/form-data; boundary=$boundary"
+                    )
+
+                    setRequestProperty(
+                        "Accept",
+                        "application/json, text/plain, */*"
+                    )
+
+                    setRequestProperty(
+                        "Accept-Language",
+                        "ru-RU,ru;q=0.9,en;q=0.8"
+                    )
+
+                    setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 13) " +
+                                "AppleWebKit/537.36 " +
+                                "(KHTML, like Gecko) " +
+                                "Chrome/120.0.0.0 " +
+                                "Mobile Safari/537.36"
+                    )
+                }
+
+            /*
+             * multipart/form-data
+             */
+            connection.outputStream.use { out ->
+
                 out.write(
-                    "Content-Disposition: form-data; name=\"upfile\"; filename=\"screenshot.jpg\"\r\n".toByteArray()
+                    "--$boundary\r\n".toByteArray()
                 )
-                out.write("Content-Type: image/jpeg\r\n\r\n".toByteArray())
+
+                out.write(
+                    (
+                        "Content-Disposition: form-data; " +
+                                "name=\"upfile\"; " +
+                                "filename=\"screenshot.jpg\"\r\n"
+                        ).toByteArray()
+                )
+
+                out.write(
+                    "Content-Type: image/jpeg\r\n\r\n"
+                        .toByteArray()
+                )
+
                 out.write(imageBytes)
-                out.write("\r\n--$boundary--\r\n".toByteArray())
+
+                out.write(
+                    "\r\n--$boundary--\r\n"
+                        .toByteArray()
+                )
+
+                out.flush()
             }
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val response = stream?.bufferedReader()?.use { it.readText() } ?: ""
-            if (code !in 200..299) {
-                Log.e(TAG, "HTTP $code: ${response.take(300)}")
+
+            val responseCode =
+                connection.responseCode
+
+            Log.i(
+                TAG,
+                "Yandex HTTP response: $responseCode"
+            )
+
+            val stream =
+                if (responseCode in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                }
+
+            val response =
+                stream?.bufferedReader()?.use {
+                    it.readText()
+                } ?: ""
+
+            /*
+             * На время отладки выводим полный ответ.
+             *
+             * Это очень важно, потому что формат
+             * ответа Yandex может измениться.
+             */
+            Log.d(
+                TAG,
+                "Yandex response: $response"
+            )
+
+            if (responseCode !in 200..299) {
+                Log.e(
+                    TAG,
+                    "Yandex HTTP error: $responseCode"
+                )
                 return null
             }
-            Log.d(TAG, "Yandex response: ${response.take(300)}")
+
             return parseCbirUrl(response)
+
+        } catch (t: Throwable) {
+
+            Log.e(
+                TAG,
+                "Yandex upload exception",
+                t
+            )
+
+            return null
+
         } finally {
-            conn.disconnect()
+            connection?.disconnect()
         }
     }
 
-    private fun parseCbirUrl(jsonStr: String): String? = try {
-        val json = JSONObject(jsonStr)
+    /**
+     * Извлекает URL/CBIR query из ответа Yandex.
+     *
+     * Поддерживаем несколько возможных вариантов структуры,
+     * чтобы приложение не ломалось при небольшом изменении JSON.
+     */
+    private fun parseCbirUrl(
+        jsonStr: String
+    ): String? {
+
         try {
-            json.getJSONObject("blocks")
-                .getJSONObject("params")
-                .getString("url")
-        } catch (_: Throwable) {
-            try {
-                json.getString("url")
-            } catch (_: Throwable) {
-                null
-            }
-        }
-    } catch (_: Throwable) {
-        null
-    }
+            val json =
+                JSONObject(jsonStr)
 
-    companion object {
-        private const val TAG = "YaCTS"
+            /*
+             * Вариант:
+             *
+             * {
+             *   "blocks": [
+             *      {
+             *        "params": {
+             *           "url": "..."
+             *        }
+             *      }
+             *   ]
+             * }
+             */
+            val blocks =
+                json.optJSONArray("blocks")
+
+            if (blocks != null) {
+
+                for (i in 0 until blocks.length()) {
+
+                    val block =
+                        blocks.optJSONObject(i)
+                            ?: continue
+
+                    val params =
+                        block.optJSONObject("params")
+
+                    val url =
+                        params?.optString("url")
+
+                    if (!url.isNullOrBlank()) {
+                        return url
+                    }
+
+                    /*
+                     * Иногда нужные данные могут находиться
+                     * непосредственно в block.
+                     */
+                    val directUrl =
+                        block.optString("url")
+
+                    if (directUrl.isNotBlank()) {
+                        return directUrl
+                    }
+                }
+            }
+
+            /*
+             * Вариант с обычным "url".
+             */
+            val directUrl =
+                json.optString("url")
+
+            if (directUrl.isNotBlank()) {
+                return directUrl
+            }
+
+            /*
+             * Иногда URL может быть в cbirUrl.
+             */
+            val cbirUrl =
+                json.optString("cbirUrl")
+
+            if (cbirUrl.isNotBlank()) {
+                return cbirUrl
+            }
+
+            /*
+             * Иногда ответ может содержать
+             * строковое поле cbir_id.
+             */
+            val cbirId =
+                json.optString("cbir_id")
+
+            if (cbirId.isNotBlank()) {
+                return "cbir_id=${
+                    URLEncoder.encode(
+                        cbirId,
+                        "UTF-8"
+                    )
+                }&rpt=imageview"
+            }
+
+            Log.e(
+                TAG,
+                "Could not find CBIR URL in Yandex response"
+            )
+
+        } catch (e: Throwable) {
+
+            Log.e(
+                TAG,
+                "Failed to parse Yandex JSON",
+                e
+            )
+        }
+
+        return null
     }
 }
