@@ -2,19 +2,15 @@ package ru.yacts.app
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
+import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.PixelFormat
 import android.hardware.HardwareBuffer
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Display
-import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -22,26 +18,46 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 
 private const val TAG = "YaCTS"
-
 private const val YANDEX_PACKAGE = "com.yandex.searchapp"
 
-class MainActivity : android.app.Activity() {
+/**
+ * Точка входа приложения.
+ *
+ * ВАЖНО:
+ * Здесь НЕТ повторного запроса через Handler.
+ *
+ * Один запуск YaCTS = ровно один запрос на скриншот.
+ */
+class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         if (isAccessibilityEnabled()) {
-            requestCapture()
+            Log.d(TAG, "Accessibility включён — запрашиваем один скриншот")
+            YaService.requestCapture()
         } else {
+            Log.d(TAG, "Accessibility выключен — открываем настройки")
+
             try {
                 startActivity(
                     Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "Не удалось открыть настройки Accessibility", e)
+                Log.e(
+                    TAG,
+                    "Не удалось открыть настройки Accessibility",
+                    e
+                )
             }
         }
 
+        /*
+         * Activity нам больше не нужна.
+         *
+         * Сам скриншот выполняется AccessibilityService
+         * асинхронно, поэтому finish() здесь безопасен.
+         */
         finish()
     }
 
@@ -59,39 +75,93 @@ class MainActivity : android.app.Activity() {
             service.resolveInfo?.serviceInfo?.packageName == packageName
         }
     }
-
-    private fun requestCapture() {
-        YaService.requestCapture()
-
-        // Небольшая задержка нужна на случай, если AccessibilityService
-        // ещё не успел получить управление.
-        Handler(Looper.getMainLooper()).postDelayed({
-            YaService.requestCapture()
-        }, 1000)
-    }
 }
 
 
+/**
+ * AccessibilityService, который:
+ *
+ * 1. получает ОДИН запрос;
+ * 2. делает ОДИН screenshot текущего экрана;
+ * 3. преобразует его в Bitmap;
+ * 4. преобразует Bitmap в JPEG;
+ * 5. сохраняет JPEG через FileProvider;
+ * 6. передаёт URI приложению Яндекс.
+ *
+ * Яндекс запускается ТОЛЬКО после успешного получения
+ * и обработки исходного скриншота.
+ */
 class YaService : AccessibilityService() {
 
     companion object {
 
+        @Volatile
         private var instance: YaService? = null
 
+        /**
+         * Есть ли ожидающий запрос на screenshot.
+         */
         @Volatile
         private var captureRequested = false
 
+        /**
+         * Выполняется ли сейчас screenshot.
+         *
+         * Это дополнительная защита от повторного запуска.
+         */
         @Volatile
         private var captureInProgress = false
 
+        /**
+         * Запросить ОДИН screenshot.
+         *
+         * Повторный вызов во время уже выполняющегося
+         * screenshot ничего не делает.
+         */
         fun requestCapture() {
-            captureRequested = true
 
-            val service = instance
+            synchronized(this) {
 
-            if (service != null) {
-                service.captureScreen()
+                /*
+                 * Если уже идёт захват — новый захват
+                 * создавать нельзя.
+                 */
+                if (captureInProgress) {
+                    Log.d(
+                        TAG,
+                        "requestCapture(): screenshot уже выполняется"
+                    )
+                    return
+                }
+
+                /*
+                 * Если запрос уже ожидает обработки,
+                 * второй запрос тоже не нужен.
+                 */
+                if (captureRequested) {
+                    Log.d(
+                        TAG,
+                        "requestCapture(): запрос уже ожидает обработки"
+                    )
+                    return
+                }
+
+                captureRequested = true
+
+                Log.d(
+                    TAG,
+                    "requestCapture(): создан новый запрос"
+                )
             }
+
+            /*
+             * Если Service уже подключён — начинаем
+             * screenshot сразу.
+             *
+             * Если ещё не подключён, onServiceConnected()
+             * увидит captureRequested и запустит его там.
+             */
+            instance?.startRequestedCapture()
         }
     }
 
@@ -100,48 +170,116 @@ class YaService : AccessibilityService() {
 
         instance = this
 
-        Log.d(TAG, "AccessibilityService подключён")
+        Log.d(
+            TAG,
+            "AccessibilityService подключён"
+        )
 
-        if (captureRequested) {
-            captureScreen()
-        }
+        /*
+         * Если запрос пришёл до подключения Service,
+         * запускаем его теперь.
+         */
+        startRequestedCapture()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Нам не нужны события интерфейса.
+        /*
+         * Accessibility-события нам не нужны.
+         *
+         * Нам нужен только API takeScreenshot().
+         */
     }
 
     override fun onInterrupt() {
-        Log.d(TAG, "AccessibilityService прерван")
+        Log.d(
+            TAG,
+            "AccessibilityService прерван"
+        )
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        Log.d(
+            TAG,
+            "AccessibilityService уничтожается"
+        )
 
-        if (instance === this) {
-            instance = null
+        synchronized(YaService::class.java) {
+            if (instance === this) {
+                instance = null
+            }
+
+            captureRequested = false
+            captureInProgress = false
         }
 
-        captureInProgress = false
-
-        Log.d(TAG, "AccessibilityService уничтожен")
+        super.onDestroy()
     }
 
+    /**
+     * Проверяет, есть ли ожидающий запрос,
+     * и запускает screenshot ровно один раз.
+     */
+    private fun startRequestedCapture() {
+
+        synchronized(YaService::class.java) {
+
+            if (!captureRequested) {
+                Log.d(
+                    TAG,
+                    "startRequestedCapture(): запросов нет"
+                )
+                return
+            }
+
+            if (captureInProgress) {
+                Log.d(
+                    TAG,
+                    "startRequestedCapture(): screenshot уже выполняется"
+                )
+                return
+            }
+
+            /*
+             * Сразу переводим состояние:
+             *
+             * REQUESTED → IN PROGRESS
+             *
+             * Поэтому даже если requestCapture()
+             * будет вызван ещё раз, второй screenshot
+             * не запустится.
+             */
+            captureRequested = false
+            captureInProgress = true
+        }
+
+        captureScreen()
+    }
+
+    /**
+     * Делает ОДИН screenshot.
+     *
+     * ВАЖНО:
+     * Яндекс ещё НЕ запущен в этот момент.
+     *
+     * Сначала полностью получаем и обрабатываем
+     * исходный экран.
+     */
     private fun captureScreen() {
 
-        if (captureInProgress) {
-            Log.d(TAG, "Скриншот уже создаётся")
-            return
-        }
+        Log.d(
+            TAG,
+            "================================================"
+        )
 
-        if (!captureRequested) {
-            return
-        }
+        Log.d(
+            TAG,
+            "НАЧАЛО SCREENSHOT"
+        )
 
-        captureRequested = false
-        captureInProgress = true
-
-        Log.d(TAG, "Начинаем создание скриншота")
+        Log.d(
+            TAG,
+            "Яндекс ещё НЕ запущен"
+        )
 
         try {
 
@@ -154,47 +292,58 @@ class YaService : AccessibilityService() {
                         screenshot: ScreenshotResult
                     ) {
 
-                        Log.d(TAG, "Скриншот получен")
+                        Log.d(
+                            TAG,
+                            "ScreenshotResult успешно получен"
+                        )
 
                         try {
 
+                            /*
+                             * 1. HardwareBuffer → Bitmap
+                             */
                             val bitmap =
                                 screenshotToBitmap(screenshot)
 
                             if (bitmap == null) {
+
                                 Log.e(
                                     TAG,
-                                    "Не удалось преобразовать скриншот в Bitmap"
+                                    "Не удалось преобразовать screenshot в Bitmap"
                                 )
 
-                                Toast.makeText(
-                                    this@YaService,
-                                    "Не удалось обработать скриншот",
-                                    Toast.LENGTH_LONG
-                                ).show()
+                                showError(
+                                    "Не удалось обработать скриншот"
+                                )
 
-                                captureInProgress = false
                                 return
                             }
 
+                            Log.d(
+                                TAG,
+                                "Bitmap получен: " +
+                                    "${bitmap.width}x${bitmap.height}"
+                            )
+
+                            /*
+                             * 2. Bitmap → JPEG
+                             */
                             val imageBytes =
                                 bitmapToJpeg(bitmap)
 
                             bitmap.recycle()
 
                             if (imageBytes == null) {
+
                                 Log.e(
                                     TAG,
                                     "Не удалось создать JPEG"
                                 )
 
-                                Toast.makeText(
-                                    this@YaService,
-                                    "Не удалось создать JPEG",
-                                    Toast.LENGTH_LONG
-                                ).show()
+                                showError(
+                                    "Не удалось создать JPEG"
+                                )
 
-                                captureInProgress = false
                                 return
                             }
 
@@ -203,35 +352,74 @@ class YaService : AccessibilityService() {
                                 "JPEG готов: ${imageBytes.size} bytes"
                             )
 
+                            /*
+                             * 3. И ТОЛЬКО ЗДЕСЬ начинаем
+                             * передачу изображения в Яндекс.
+                             *
+                             * До этого момента Яндекс
+                             * вообще не запускался.
+                             */
                             sendImageToYandex(imageBytes)
 
                         } catch (e: Exception) {
 
                             Log.e(
                                 TAG,
-                                "Ошибка обработки скриншота",
+                                "Ошибка обработки screenshot",
                                 e
                             )
 
+                            showError(
+                                "Ошибка обработки скриншота"
+                            )
+
                         } finally {
-                            captureInProgress = false
+
+                            /*
+                             * Захват полностью завершён.
+                             *
+                             * ВАЖНО:
+                             * здесь НЕ вызывается captureScreen()
+                             * и НЕ создаётся новый запрос.
+                             */
+                            synchronized(YaService::class.java) {
+                                captureInProgress = false
+                            }
+
+                            Log.d(
+                                TAG,
+                                "SCREENSHOT ЗАВЕРШЁН"
+                            )
+
+                            Log.d(
+                                TAG,
+                                "================================================"
+                            )
                         }
                     }
 
-                    override fun onFailure(errorCode: Int) {
+                    override fun onFailure(
+                        errorCode: Int
+                    ) {
 
                         Log.e(
                             TAG,
-                            "Ошибка screenshot. Код: $errorCode"
+                            "takeScreenshot() завершился ошибкой. " +
+                                "Код: $errorCode"
                         )
 
-                        Toast.makeText(
-                            this@YaService,
-                            "Ошибка создания скриншота (код $errorCode)",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        showError(
+                            "Ошибка создания скриншота (код $errorCode)"
+                        )
 
-                        captureInProgress = false
+                        synchronized(YaService::class.java) {
+                            captureInProgress = false
+                        }
+
+                        Log.d(
+                            TAG,
+                            "SCREENSHOT ЗАВЕРШЁН С ОШИБКОЙ"
+                        )
                     }
                 }
             )
@@ -240,47 +428,94 @@ class YaService : AccessibilityService() {
 
             Log.e(
                 TAG,
-                "Ошибка вызова takeScreenshot",
+                "Исключение при вызове takeScreenshot()",
                 e
             )
 
-            captureInProgress = false
+            synchronized(YaService::class.java) {
+                captureInProgress = false
+            }
+
+            showError(
+                "Не удалось сделать скриншот: ${e.message}"
+            )
         }
     }
 
+    /**
+     * HardwareBuffer → обычный ARGB_8888 Bitmap.
+     */
     private fun screenshotToBitmap(
         screenshot: ScreenshotResult
     ): Bitmap? {
 
-        val hardwareBuffer =
-            screenshot.hardwareBuffer ?: return null
+        val hardwareBuffer: HardwareBuffer =
+            screenshot.hardwareBuffer
+                ?: run {
+                    Log.e(
+                        TAG,
+                        "ScreenshotResult.hardwareBuffer == null"
+                    )
+                    return null
+                }
 
-        val colorSpace =
-            screenshot.colorSpace
+        return try {
 
-        val hardwareBitmap =
-            Bitmap.wrapHardwareBuffer(
-                hardwareBuffer,
-                colorSpace
-            )
+            val hardwareBitmap =
+                Bitmap.wrapHardwareBuffer(
+                    hardwareBuffer,
+                    screenshot.colorSpace
+                )
 
-        hardwareBuffer.close()
+            if (hardwareBitmap == null) {
+                Log.e(
+                    TAG,
+                    "Bitmap.wrapHardwareBuffer() вернул null"
+                )
+                return null
+            }
 
-        if (hardwareBitmap == null) {
-            return null
+            /*
+             * Копируем Hardware Bitmap в обычный Bitmap,
+             * потому что его можно безопасно сжать в JPEG.
+             */
+            val softwareBitmap =
+                hardwareBitmap.copy(
+                    Bitmap.Config.ARGB_8888,
+                    false
+                )
+
+            hardwareBitmap.recycle()
+
+            if (softwareBitmap == null) {
+                Log.e(
+                    TAG,
+                    "Не удалось скопировать Hardware Bitmap"
+                )
+            }
+
+            softwareBitmap
+
+        } finally {
+
+            /*
+             * HardwareBuffer больше не нужен.
+             */
+            try {
+                hardwareBuffer.close()
+            } catch (e: Exception) {
+                Log.w(
+                    TAG,
+                    "Не удалось закрыть HardwareBuffer",
+                    e
+                )
+            }
         }
-
-        val softwareBitmap =
-            hardwareBitmap.copy(
-                Bitmap.Config.ARGB_8888,
-                false
-            )
-
-        hardwareBitmap.recycle()
-
-        return softwareBitmap
     }
 
+    /**
+     * Bitmap → JPEG byte array.
+     */
     private fun bitmapToJpeg(
         bitmap: Bitmap
     ): ByteArray? {
@@ -288,63 +523,111 @@ class YaService : AccessibilityService() {
         val outputStream =
             ByteArrayOutputStream()
 
-        val success =
-            bitmap.compress(
-                Bitmap.CompressFormat.JPEG,
-                90,
-                outputStream
+        return try {
+
+            val success =
+                bitmap.compress(
+                    Bitmap.CompressFormat.JPEG,
+                    90,
+                    outputStream
+                )
+
+            if (!success) {
+
+                Log.e(
+                    TAG,
+                    "Bitmap.compress() вернул false"
+                )
+
+                null
+
+            } else {
+
+                outputStream.toByteArray()
+            }
+
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "Ошибка JPEG compression",
+                e
             )
 
-        if (!success) {
-            outputStream.close()
-            return null
+            null
+
+        } finally {
+
+            try {
+                outputStream.close()
+            } catch (_: Exception) {
+            }
         }
-
-        val bytes =
-            outputStream.toByteArray()
-
-        outputStream.close()
-
-        return bytes
     }
 
+    /**
+     * Сохраняет полученный screenshot и передаёт его
+     * приложению Яндекс.
+     *
+     * На момент вызова этой функции screenshot уже
+     * полностью получен.
+     */
     private fun sendImageToYandex(
         imageBytes: ByteArray
     ) {
 
+        var imageFile: File? = null
+
         try {
 
             /*
-             * Сохраняем изображение во временный файл.
-             *
-             * Оно НЕ отправляется через HTTP.
-             *
-             * Файл будет передан приложению Яндекс
-             * через Android content:// URI.
+             * Создаём собственную директорию
+             * внутри cache приложения.
              */
-
             val cacheDirectory =
-                File(cacheDir, "yacts_images")
+                File(
+                    cacheDir,
+                    "yacts_images"
+                )
 
             if (!cacheDirectory.exists()) {
-                cacheDirectory.mkdirs()
+
+                if (!cacheDirectory.mkdirs() &&
+                    !cacheDirectory.exists()
+                ) {
+
+                    throw IllegalStateException(
+                        "Не удалось создать директорию cache"
+                    )
+                }
             }
 
-            val imageFile =
+            /*
+             * Уникальное имя файла.
+             */
+            imageFile =
                 File(
                     cacheDirectory,
                     "yacts_${System.currentTimeMillis()}.jpg"
                 )
 
+            /*
+             * Сохраняем JPEG.
+             */
             imageFile.outputStream().use { output ->
                 output.write(imageBytes)
+                output.flush()
             }
 
             Log.d(
                 TAG,
-                "Изображение сохранено: ${imageFile.absolutePath}"
+                "Изображение сохранено: " +
+                    imageFile.absolutePath
             )
 
+            /*
+             * Получаем content:// URI через FileProvider.
+             */
             val imageUri: Uri =
                 FileProvider.getUriForFile(
                     this,
@@ -354,9 +637,15 @@ class YaService : AccessibilityService() {
 
             Log.d(
                 TAG,
-                "URI: $imageUri"
+                "Получен URI: $imageUri"
             )
 
+            /*
+             * Формируем Intent.
+             *
+             * Яндекс запускается только сейчас,
+             * после завершения screenshot.
+             */
             val intent =
                 Intent(Intent.ACTION_SEND).apply {
 
@@ -367,7 +656,9 @@ class YaService : AccessibilityService() {
                         imageUri
                     )
 
-                    setPackage(YANDEX_PACKAGE)
+                    setPackage(
+                        YANDEX_PACKAGE
+                    )
 
                     addFlags(
                         Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -379,50 +670,45 @@ class YaService : AccessibilityService() {
                 }
 
             /*
-             * Проверяем, умеет ли установленное приложение Яндекс
-             * принять ACTION_SEND с изображением.
+             * Проверяем, существует ли обработчик.
              */
-
-            val packageManager =
-                packageManager
-
             val resolvedActivity =
-                intent.resolveActivity(packageManager)
+                intent.resolveActivity(
+                    packageManager
+                )
 
             if (resolvedActivity == null) {
 
                 Log.e(
                     TAG,
-                    "Приложение Яндекс не принимает ACTION_SEND image/jpeg " +
-                    "(не установлено или недоступно из-за package visibility)"
+                    "Яндекс не может принять ACTION_SEND " +
+                        "с image/jpeg"
                 )
 
-                Toast.makeText(
-                    this,
+                showError(
                     "Не удалось найти приложение Яндекс. " +
-                    "Проверьте, что оно установлено и обновлено.",
-                    Toast.LENGTH_LONG
-                ).show()
+                        "Проверьте, что оно установлено и обновлено."
+                )
 
-                try {
-                    imageFile.delete()
-                } catch (_: Exception) {
-                }
+                imageFile.delete()
 
                 return
             }
 
             /*
-             * Дополнительно выдаём Яндексу разрешение
-             * на чтение content:// URI.
+             * Явно выдаём Яндексу доступ к content:// URI.
              */
-
             try {
 
                 grantUriPermission(
                     YANDEX_PACKAGE,
                     imageUri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+
+                Log.d(
+                    TAG,
+                    "URI permission выдан Яндексу"
                 )
 
             } catch (e: Exception) {
@@ -436,10 +722,38 @@ class YaService : AccessibilityService() {
 
             Log.d(
                 TAG,
-                "Отправляем изображение в $YANDEX_PACKAGE"
+                "------------------------------------------------"
             )
 
+            Log.d(
+                TAG,
+                "ОТКРЫВАЕМ ЯНДЕКС"
+            )
+
+            Log.d(
+                TAG,
+                "Это первый запуск Яндекса после screenshot"
+            )
+
+            Log.d(
+                TAG,
+                "Передаваемый URI: $imageUri"
+            )
+
+            Log.d(
+                TAG,
+                "------------------------------------------------"
+            )
+
+            /*
+             * ЕДИНСТВЕННЫЙ startActivity() для Яндекса.
+             */
             startActivity(intent)
+
+            Log.d(
+                TAG,
+                "Яндекс успешно запущен"
+            )
 
         } catch (e: Exception) {
 
@@ -449,11 +763,44 @@ class YaService : AccessibilityService() {
                 e
             )
 
+            showError(
+                "Ошибка отправки изображения в Яндекс: " +
+                    (e.message ?: "неизвестная ошибка")
+            )
+
+            /*
+             * Если файл уже успел создаться,
+             * пытаемся удалить его при ошибке.
+             */
+            try {
+                imageFile?.delete()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
+     * Показывает ошибку пользователю.
+     */
+    private fun showError(
+        message: String
+    ) {
+
+        try {
+
             Toast.makeText(
                 this,
-                "Ошибка отправки изображения в Яндекс: ${e.message}",
+                message,
                 Toast.LENGTH_LONG
             ).show()
+
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "Не удалось показать Toast",
+                e
+            )
         }
     }
 }
