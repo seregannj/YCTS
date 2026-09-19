@@ -19,11 +19,8 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.UUID
 
-/**
- * Прозрачный лаунчер. При первом запуске показывает одноразовый
- * экран настройки (нужно включить accessibility-сервис).
- * После включения — невидимый: просто отдаёт команду сервису и finish().
- */
+private const val ACTION_CAPTURE = "ru.yacts.app.CAPTURE"
+
 class MainActivity : Activity() {
 
     private var inSetup = false
@@ -40,16 +37,13 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // Вернулись из Настроек — проверяем, не включили ли сервис
         if (inSetup && isAccessibilityEnabled()) {
             triggerCaptureAndFinish()
         }
     }
 
     private fun triggerCaptureAndFinish() {
-        startService(
-            Intent(this, YaService::class.java).setAction(ACTION_CAPTURE)
-        )
+        startService(Intent(this, YaService::class.java).setAction(ACTION_CAPTURE))
         finish()
     }
 
@@ -88,16 +82,8 @@ class MainActivity : Activity() {
         root.addView(btn)
         setContentView(root)
     }
-
-    companion object {
-        private const val ACTION_CAPTURE = "ru.yacts.app.CAPTURE"
-    }
 }
 
-/**
- * Главный модуль: делает скриншот через takeScreenshot() (Android 11+),
- * загружает в Yandex CBIR, открывает результат в Яндекс Браузере.
- */
 class YaService : AccessibilityService() {
 
     override fun onServiceConnected() {
@@ -106,9 +92,7 @@ class YaService : AccessibilityService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == MainActivity.Companion.let { _ ->
-                "ru.yacts.app.CAPTURE"
-            }) {
+        if (intent?.action == ACTION_CAPTURE) {
             captureScreen()
         }
         return START_NOT_STICKY
@@ -129,8 +113,8 @@ class YaService : AccessibilityService() {
                             Log.e(TAG, "Bitmap is null")
                             return
                         }
-                        val soft = hardKmp.copy(Bitmap.Config.ARGB_8888, false)
-                        hardKmp.recycle()
+                        val soft = hardBmp.copy(Bitmap.Config.ARGB_8888, false)
+                        hardBmp.recycle()
 
                         val baos = ByteArrayOutputStream()
                         soft.compress(Bitmap.CompressFormat.JPEG, 85, baos)
@@ -164,7 +148,6 @@ class YaService : AccessibilityService() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
-            // Пробуем открыть в Яндекс Браузере
             for (pkg in listOf(
                 "ru.yandex.yandexbrowser",
                 "ru.yandex.browser",
@@ -176,7 +159,6 @@ class YaService : AccessibilityService() {
                     return
                 }
             }
-            // Фолбэк — дефолтный браузер
             intent.setPackage(null)
             startActivity(intent)
         } catch (t: Throwable) {
